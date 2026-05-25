@@ -1370,20 +1370,23 @@ def qplot(BOLD, dt=1, downsamp=1,
 
 if __name__ == "__main__":
     import os
-
     # Run the wheels off it yipeeeeee
 
     FC    = np.load("FC.npy")
     SC    = np.load("SC.npy")
     Freqs = np.load("Freqs.npy")
 
-    timings = fmri_params(0.72, 14.33 * 2 * 60, verbose=True)  # HCP
+    # Run the wheels off it yipeeeeee
+
+    timings = fmri_params(0.72, 14.33 * 2 * 60, verbose=True) # HCP
+    #timings = PF.fmri_params(1.4, 256 * 1.4, verbose = True) # MDMA
+
 
     GEC_results = optimize_GEC(
                     FC, C=SC,
                     use_analytical_grad=False,
                     optimizer_type='adam',
-                    lr=2e-3,
+                    lr=1e-2,
                     min_lr=5e-5,
                     grad_clip=1.0,
                     weight_decay=1e-5,
@@ -1391,8 +1394,8 @@ if __name__ == "__main__":
                     teq_opt=60.0,
                     tmax_opt=None,
                     n_simulations=4,
-                    n_iterations=1500,
-                    scheduler_patience=80,
+                    n_iterations=3000,
+                    scheduler_patience=400,
                     max_gec=0.5,
                     gec_init_max=0.1,
                     allow_negative=True,
@@ -1401,11 +1404,9 @@ if __name__ == "__main__":
                     verbose=True,
                     w=Freqs,
                     device=torch.device('cpu'),
-                    wandb_project=os.environ.get('WANDB_PROJECT', None),
-                    wandb_run_name=os.environ.get('WANDB_NAME', None),
                     **timings,
     )
-    np.save('o-GEC.npy', GEC_results)
+    np.save('o-weights.npy', GEC_results)
 
     GEC = GEC_results['optimized_GEC']
 
