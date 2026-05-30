@@ -768,6 +768,7 @@ def optimize_GEC(empirical_FC, C=None,
                  tbptt_k=None,
                  tbptt_frac=0.4,
                  full_output=False,
+                 C_offset=None,
                  device='cpu',
                  wandb_project=None,
                  wandb_run_name=None,
@@ -961,11 +962,12 @@ def optimize_GEC(empirical_FC, C=None,
             print("No SC provided; initializing GEC with small random weights.",
                   flush=True)
 
-    # Scale SC so initial GEC has a sensible weight range
-
-    # Potentially change this to weight init max
-
-    if gec_init_max is not None and C is not None:
+    # Scale SC so initial GEC has a sensible weight range.
+    # When C_offset is provided the effective GEC starts at C_offset + 0*basis,
+    # so SC-based scaling would double the initial magnitude — use zeros instead.
+    if C_offset is not None:
+        C_for_init = np.zeros((nnodes, nnodes))
+    elif gec_init_max is not None and C is not None:
         c_max = float(C_np.max())
         C_for_init = C_np * (gec_init_max / c_max) if c_max > 0 else C_np
     else:
@@ -996,6 +998,14 @@ def optimize_GEC(empirical_FC, C=None,
     # Fixed basis (no grad) — the 39 LR matrices never change
     basis_t = torch.tensor(basis_np, dtype=torch.float32, device=device)
     basis_t.requires_grad_(False)
+
+    # Optional fixed GEC offset (e.g. resting-state GEC) — frozen throughout
+    if C_offset is not None:
+        C_offset_np = np.asarray(C_offset, dtype=np.float64)
+        C_offset_t  = torch.tensor(C_offset_np, dtype=torch.float32, device=device)
+    else:
+        C_offset_np = None
+        C_offset_t  = None
 
     # Trainable: one scalar weight per LR matrix
     alpha = nn.Parameter(torch.zeros(n_lr, dtype=torch.float32, device=device))
@@ -1055,6 +1065,8 @@ def optimize_GEC(empirical_FC, C=None,
             _alpha_np = alpha.detach().cpu().numpy().astype(np.float64)
             gec_np = np.einsum('k,kij->ij', _alpha_np,
                                basis_np.astype(np.float64)) * mask_np
+            if C_offset_np is not None:
+                gec_np = C_offset_np + gec_np
             if not allow_negative:
                 gec_np = np.maximum(gec_np, 0.0)
             model.GEC = torch.tensor(gec_np, dtype=torch.float32, device=device)
@@ -1098,7 +1110,7 @@ def optimize_GEC(empirical_FC, C=None,
             # Mask is applied inside the model forward (out-of-place) so use_sc_mask
             # still governs which connections are active.
             gec_computed = torch.einsum('k,kij->ij', alpha, basis_t)
-            model.GEC = gec_computed
+            model.GEC = gec_computed if C_offset_t is None else C_offset_t + gec_computed
 
             # Stacked gradient with single backward
             sim_corr_triu_list = []
@@ -1224,7 +1236,9 @@ def optimize_GEC(empirical_FC, C=None,
             break
 
     with torch.no_grad():
-        optimized_GEC = (torch.einsum('k,kij->ij', alpha, basis_t) * mask_t).cpu().numpy()
+        gec_delta = (torch.einsum('k,kij->ij', alpha, basis_t) * mask_t).cpu().numpy()
+        optimized_GEC = (gec_delta if C_offset_t is None
+                         else C_offset_np + gec_delta)
     optimized_alpha = alpha.detach().cpu().numpy()
 
     if full_output:
@@ -1251,7 +1265,9 @@ def optimize_GEC(empirical_FC, C=None,
                 model.downsamp = downsamp
                 model.dt_tensor = torch.tensor(dt, dtype=torch.float32, device=device)
             with torch.no_grad():
-                model.GEC = torch.einsum('k,kij->ij', alpha, basis_t)
+                gec_delta_t = torch.einsum('k,kij->ij', alpha, basis_t)
+                model.GEC = (gec_delta_t if C_offset_t is None
+                             else C_offset_t + gec_delta_t)
             with torch.no_grad():
                 opt_results, time_vector_t = model(mask_t, allow_negative)
             final_FC = torch.corrcoef(opt_results[:, :, 0].T).detach().cpu().numpy()
@@ -1301,6 +1317,7 @@ def optimize_GEC(empirical_FC, C=None,
 
     return {
         "optimized_GEC":   optimized_GEC,
+        "optimized_GEC_delta": gec_delta,
         "optimized_alpha": optimized_alpha,
         "lr_names":        lr_names,
         "fc_history":      FC_history,
