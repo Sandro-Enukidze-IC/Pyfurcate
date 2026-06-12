@@ -769,9 +769,10 @@ def optimize_GEC(empirical_FC, C=None,
                  tbptt_frac=0.4,
                  full_output=False,
                  C_offset=None,
+                 l1_lambda=0.0,
                  device='cpu',
-                 wandb_project=None,
-                 wandb_run_name=None,
+                 wandb_project="hopf-optimisation",
+                 wandb_run_name="weights-synthetic",
                  heatmap_every=50):
     """
     Fit a Generative Effective Connectivity (GEC) matrix to empirical FC by
@@ -923,7 +924,6 @@ def optimize_GEC(empirical_FC, C=None,
     _Nsim_opt = (_Nmax_opt + _Neq_opt - 1) * _downsamp + 1
     _tbptt_k  = tbptt_k if tbptt_k is not None else max(1, int(tbptt_frac * _Nsim_opt))
 
-    # Load LR basis matrices — fixed throughout training, never modified
     import pickle as _pickle
     with open('lr_matrices.pkl', 'rb') as _f:
         _lr_dict = _pickle.load(_f)
@@ -962,9 +962,7 @@ def optimize_GEC(empirical_FC, C=None,
             print("No SC provided; initializing GEC with small random weights.",
                   flush=True)
 
-    # Scale SC so initial GEC has a sensible weight range.
-    # When C_offset is provided the effective GEC starts at C_offset + 0*basis,
-    # so SC-based scaling would double the initial magnitude — use zeros instead.
+    #Scale SC
     if C_offset is not None:
         C_for_init = np.zeros((nnodes, nnodes))
     elif gec_init_max is not None and C is not None:
@@ -995,11 +993,9 @@ def optimize_GEC(empirical_FC, C=None,
     triu_row, triu_col = triu_indices[0], triu_indices[1]
     mask_t = torch.tensor(mask_np, dtype=torch.float32, device=device)
 
-    # Fixed basis (no grad) — the 39 LR matrices never change
     basis_t = torch.tensor(basis_np, dtype=torch.float32, device=device)
     basis_t.requires_grad_(False)
 
-    # Optional fixed GEC offset (e.g. resting-state GEC) — frozen throughout
     if C_offset is not None:
         C_offset_np = np.asarray(C_offset, dtype=np.float64)
         C_offset_t  = torch.tensor(C_offset_np, dtype=torch.float32, device=device)
@@ -1007,10 +1003,7 @@ def optimize_GEC(empirical_FC, C=None,
         C_offset_np = None
         C_offset_t  = None
 
-    # Trainable: one scalar weight per LR matrix
     alpha = nn.Parameter(torch.zeros(n_lr, dtype=torch.float32, device=device))
-
-    # Deregister model.GEC as a Parameter; it will be set from alpha each iteration
     del model._parameters['GEC']
     model.GEC = torch.zeros(nnodes, nnodes, dtype=torch.float32, device=device)
 
@@ -1084,31 +1077,25 @@ def optimize_GEC(empirical_FC, C=None,
             sim_triu = sim_corr_np[triu_idx_np]
             emp_triu = empirical_FC_np[triu_idx_np]
             r_val    = float(np.corrcoef(sim_triu, emp_triu)[0, 1])
-            loss_val = 1.0 - r_val
+            loss_val = float(np.mean((sim_triu - emp_triu) ** 2))
+            if l1_lambda > 0:
+                loss_val += l1_lambda * float(np.abs(_alpha_np).sum())
 
-            # Gradient of (1 - r) w.r.t. each sim_triu element, expanded to full matrix
-            sim_c  = sim_triu - sim_triu.mean()
-            emp_c  = emp_triu - emp_triu.mean()
-            Sx     = np.linalg.norm(sim_c) + 1e-8
-            Sy     = np.linalg.norm(emp_c) + 1e-8
-            dloss_dsim_triu = -(emp_c - r_val * (Sy / Sx) * sim_c) / (Sx * Sy)
+            dloss_dsim_triu = 2.0 * (sim_triu - emp_triu) / len(sim_triu)
             dloss_dFC = np.zeros((nnodes, nnodes))
             dloss_dFC[triu_idx_np] = dloss_dsim_triu
             dloss_dFC += dloss_dFC.T  # symmetrise
-
-            # Chain rule: d_loss/d_alpha_k = sum_ij(d_loss/d_GEC_ij * basis_k[i,j])
             gec_grad_np = np.clip(dloss_dFC * mask_np, -grad_clip, grad_clip)
             alpha_grad_np = np.einsum('ij,kij->k', gec_grad_np,
                                       basis_np.astype(np.float64)).astype(np.float32)
+            if l1_lambda > 0:
+                alpha_grad_np += l1_lambda * np.sign(_alpha_np).astype(np.float32)
 
             loss         = torch.tensor(loss_val,    dtype=torch.float32, device=device)
             simulated_FC = torch.tensor(sim_corr_np, dtype=torch.float32, device=device)
             alpha.grad   = torch.tensor(alpha_grad_np, dtype=torch.float32, device=device)
 
         else:
-            # GEC is a linear combination of fixed LR matrices weighted by alpha.
-            # Mask is applied inside the model forward (out-of-place) so use_sc_mask
-            # still governs which connections are active.
             gec_computed = torch.einsum('k,kij->ij', alpha, basis_t)
             model.GEC = gec_computed if C_offset_t is None else C_offset_t + gec_computed
 
@@ -1127,25 +1114,23 @@ def optimize_GEC(empirical_FC, C=None,
                 simulated_FC = sim_metric_t
 
             fc_mean_triu  = torch.stack(sim_corr_triu_list).mean(0)
-            fc_corr       = torch.corrcoef(
-                                torch.stack([fc_mean_triu,
-                                             empirical_FC_t[triu_row, triu_col]]))[0, 1]
-            loss          = 1.0 - fc_corr
+            emp_triu_t    = empirical_FC_t[triu_row, triu_col]
+            loss          = torch.mean((fc_mean_triu - emp_triu_t) ** 2)
+            if l1_lambda > 0:
+                loss = loss + l1_lambda * alpha.abs().sum()
             loss.backward()
-            fc_similarity = fc_corr.detach()
+            with torch.no_grad():
+                fc_similarity = torch.corrcoef(
+                    torch.stack([fc_mean_triu, emp_triu_t]))[0, 1]
             loss          = loss.detach()
-
-            # L2 norm clipping preserves gradient direction
             torch.nn.utils.clip_grad_norm_([alpha], max_norm=grad_clip)
 
-        # Gradient step and post-processing
         optimizer.step()
         with torch.no_grad():
             if not allow_negative:
                 alpha.data.clamp_(min=0)
         scheduler.step(loss.item())
 
-        # Tracking
         with torch.no_grad():
             fc_similarity = torch.corrcoef(
                 torch.stack([empirical_FC_t[triu_row, triu_col],
@@ -1174,12 +1159,13 @@ def optimize_GEC(empirical_FC, C=None,
             current_lr = optimizer.param_groups[0]['lr']
             alpha_np_log = alpha.detach().cpu().numpy()
             log_dict = {
-                "train/loss":     loss.item(),
-                "train/fc_corr":  fc_similarity.item(),
-                "train/lr":       current_lr,
-                "train/grad_max": grad_max,
-                "train/gec_max":  gec_max,
-                "train/gec_mean": gec_mean,
+                "train/loss":              loss.item(),
+                "train/fc_corr":           fc_similarity.item(),
+                "train/lr":                current_lr,
+                "train/grad_max":          grad_max,
+                "train/gec_max":           gec_max,
+                "train/gec_mean":          gec_mean,
+                "train/elapsed_time_min":  (time.time() - start_time) / 60,
                 **{f"alpha/{name}": float(v)
                    for name, v in zip(lr_names, alpha_np_log)},
             }
@@ -1387,16 +1373,16 @@ def qplot(BOLD, dt=1, downsamp=1,
 
 if __name__ == "__main__":
     import os
+
+    Freqs = np.load('Freqs.npy')
+    SC = np.load('SC.npy')
+    FC = np.load('offset_FC.npy')
+    GEC_offset = np.load('offset_GEC_offset.npy')
+
     # Run the wheels off it yipeeeeee
 
-    FC    = np.load("FC.npy")
-    SC    = np.load("SC.npy")
-    Freqs = np.load("Freqs.npy")
-
-    # Run the wheels off it yipeeeeee
-
-    timings = fmri_params(0.72, 14.33 * 2 * 60, verbose=True) # HCP
-    #timings = PF.fmri_params(1.4, 256 * 1.4, verbose = True) # MDMA
+    # timings = fmri_params(0.72, 14.33 * 2 * 60, verbose=True) # HCP
+    timings = fmri_params(1.4, 256 * 1.4, verbose = True) # MDMA
 
 
     GEC_results = optimize_GEC(
@@ -1411,16 +1397,19 @@ if __name__ == "__main__":
                     teq_opt=60.0,
                     tmax_opt=None,
                     n_simulations=4,
-                    n_iterations=3000,
-                    scheduler_patience=400,
+                    n_iterations=1000,
+                    scheduler_patience=200,
                     max_gec=0.5,
                     gec_init_max=0.1,
+                    l1_lambda=1e-4,
                     allow_negative=True,
                     use_sc_mask=True,
                     use_filt=False,
                     verbose=True,
                     w=Freqs,
                     device=torch.device('cpu'),
+                    C_offset=GEC_offset,
+                    wandb_run_name="wg1000it",
                     **timings,
     )
     np.save('o-weights.npy', GEC_results)
