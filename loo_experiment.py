@@ -21,7 +21,6 @@ import os
 import Pyfurcate     as PF
 import Pyfurcate_GEC as PF_GEC
 
-# ── Data ──────────────────────────────────────────────────────────────────────
 mat      = sio.loadmat('ROI_mdma_maas_timeseries_PSC_noGSR_scrub.mat')
 ts_data  = mat['roi_timeseries'][0, 0]['schaefer232']  # (11, 2): col0=mdma, col1=pla
 SC       = np.load('SC.npy')
@@ -40,7 +39,6 @@ timings    = PF.fmri_params(TR, 256 * TR, verbose=True)
 mask_np = np.where(SC > 0, 1.0, 0.0)
 np.fill_diagonal(mask_np, 0.0)
 
-# Pre-compute empirical FC for every subject × condition
 print("Computing empirical FC matrices...")
 FC_pla  = []
 FC_mdma = []
@@ -52,6 +50,7 @@ for s in range(N_SUBJECTS):
 print(f"  Done — {N_SUBJECTS} subjects, FC shape {FC_pla[0].shape}")
 
 # ── Shared optimisation settings ──────────────────────────────────────────────
+#This code was written and debugged with the help of Claude Opus 4.8
 GEC_KWARGS = dict(
     C                  = SC,
     use_analytical_grad= False,
@@ -170,6 +169,7 @@ for left_out in range(N_SUBJECTS):
     })
 
 # ── Summary ───────────────────────────────────────────────────────────────────
+#This code was written with the help of Claude Opus 4.8
 print(f"\n{'='*60}")
 print("  LOO SUMMARY")
 print(f"{'='*60}")

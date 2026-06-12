@@ -931,6 +931,8 @@ def optimize_GEC(empirical_FC, C=None,
     n_lr     = len(lr_names)
     basis_np = np.stack([_lr_dict[k] for k in lr_names], axis=0).astype(np.float32)  # (n_lr, N, N)
 
+
+    #This code was written with the help of Claude Opus 4.8
     _use_wandb = wandb_project is not None
     if _use_wandb:
         wandb.init(
@@ -1155,6 +1157,7 @@ def optimize_GEC(empirical_FC, C=None,
                   f"GEC |max/mean|={gec_max:.4f}/{gec_mean:.4f}, "
                   f"t={mins:.3f} min", flush=True)
 
+        #This code is written with the help of Claude Opus 4.8 
         if _use_wandb:
             current_lr = optimizer.param_groups[0]['lr']
             alpha_np_log = alpha.detach().cpu().numpy()
@@ -1271,6 +1274,7 @@ def optimize_GEC(empirical_FC, C=None,
         avg_weight_pos = float(np.mean(GEC_pos[GEC_pos > 0])) if np.any(GEC_pos > 0) else 0.0
         avg_weight_neg = float(np.mean(GEC_neg[GEC_neg > 0])) if np.any(GEC_neg > 0) else 0.0
 
+        #This code is written with the help of Claude Opus 4.8
         if _use_wandb:
             wandb.summary["final/fc_similarity"]  = fc_sim_val
             wandb.summary["final/n_negative"]      = n_negative

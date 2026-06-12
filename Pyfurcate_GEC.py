@@ -924,6 +924,7 @@ def optimize_GEC(empirical_FC, C=None,
     _Nsim_opt = (_Nmax_opt + _Neq_opt - 1) * _downsamp + 1
     _tbptt_k  = tbptt_k if tbptt_k is not None else max(1, int(tbptt_frac * _Nsim_opt))
 
+    #This code was written with the help of Claude Opus 4.8
     _use_wandb = wandb_project is not None
     if _use_wandb:
         C_tmp = C if C is not None else np.zeros((nnodes, nnodes))
@@ -1139,6 +1140,7 @@ def optimize_GEC(empirical_FC, C=None,
                   f"GEC |max/mean|={gec_max:.4f}/{gec_mean:.4f}, "
                   f"t={mins:.3f} min", flush=True)
 
+        #This code was written with the help of Claude Opus 4.8
         if _use_wandb:
             current_lr = optimizer.param_groups[0]['lr']
             log_dict = {
@@ -1234,6 +1236,8 @@ def optimize_GEC(empirical_FC, C=None,
         avg_weight_pos = float(np.mean(GEC_pos[GEC_pos > 0])) if np.any(GEC_pos > 0) else 0.0
         avg_weight_neg = float(np.mean(GEC_neg[GEC_neg > 0])) if np.any(GEC_neg > 0) else 0.0
 
+
+        #This code was written with the help of Claude Opus 4.8
         if _use_wandb:
             wandb.summary["final/fc_similarity"] = fc_sim_val
             wandb.summary["final/n_negative"]     = n_negative
